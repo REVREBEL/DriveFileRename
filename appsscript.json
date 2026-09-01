@@ -1,0 +1,57 @@
+{
+  "timeZone": "America/New_York",
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "dependencies": {
+    "enabledAdvancedServices": [
+      {
+        "userSymbol": "Drive",
+        "version": "v3",
+        "serviceId": "drive"
+      }
+    ],
+    "libraries": [
+      {
+        "userSymbol": "PdfApp",
+        "version": "23",
+        "libraryId": "1wlEYkmDOSGb3Iuqd93a7cbQofcfwg5anjyvYmS3N4-nRAYHED8pVFaTY"
+      }
+    ]
+  },
+  "urlFetchWhitelist": [
+    "https://generativelanguage.googleapis.com/"
+  ],
+  "addOns": {
+    "common": {
+      "name": "DriveRenamer",
+      "logoUrl": "https://www.gstatic.com/images/branding/product/1x/drive_48dp.png",
+      "useLocaleFromApp": true,
+      "openLinkUrlPrefixes": [
+        "https://script.google.com/macros/s/",
+        "https://script.google.com/"
+      ],
+      "homepageTrigger": {
+        "runFunction": "onHomepage",
+        "enabled": true
+      }
+    },
+    "drive": {
+      "onItemsSelectedTrigger": {
+        "runFunction": "onItemsSelected"
+      }
+    }
+  },
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/drive.addons.metadata.readonly",
+    "https://www.googleapis.com/auth/script.external_request",
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/script.locale"
+  ],
+  "webapp": {
+    "executeAs": "USER_ACCESSING",
+    "access": "ANYONE"
+  }
+}
