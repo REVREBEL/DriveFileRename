@@ -9,7 +9,14 @@ let aiInstance: GoogleGenAI | null = null;
  */
 export function initGemini(apiKey: string) {
   if (apiKey) {
-    aiInstance = new GoogleGenAI({ apiKey });
+    aiInstance = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
   }
 }
 
@@ -37,7 +44,14 @@ function getAi() {
       throw new Error("GEMINI_API_KEY_MISSING: Gemini API key is not configured. Please add it via settings or in Google Apps Script Script Properties.");
     }
 
-    aiInstance = new GoogleGenAI({ apiKey });
+    aiInstance = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
   }
   return aiInstance;
 }
@@ -77,6 +91,23 @@ async function fetchWithRetry<T>(apiCallFn: () => Promise<T>, maxRetries = 3, in
   throw new Error("Unexpected retry failure");
 }
 
+// Canonical evergreen alias: Google automatically resolves 'gemini-flash-latest' to the newest active Flash model
+export const DEFAULT_GEMINI_MODEL = "gemini-flash-latest";
+
+/**
+ * Returns the currently active Gemini model name from env, localStorage, or the default evergreen alias.
+ */
+export function getActiveGeminiModel(): string {
+  if (typeof process !== "undefined" && process.env && process.env.GEMINI_MODEL) {
+    return process.env.GEMINI_MODEL;
+  }
+  if (typeof window !== "undefined") {
+    const customModel = localStorage.getItem("GEMINI_MODEL");
+    if (customModel && customModel.trim()) return customModel.trim();
+  }
+  return DEFAULT_GEMINI_MODEL;
+}
+
 export async function getRenameSuggestions(
   files: { id: string; name: string; content?: string }[],
   intent: string
@@ -98,35 +129,63 @@ export async function getRenameSuggestions(
   try {
     console.log("Calling Gemini with prompt:", prompt);
     
-    const response = await fetchWithRetry(() => ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-      config: {
-        tools: [{ functionDeclarations: [proposeFileRenamesTool] }],
-      },
-    }));
+    const activeModel = getActiveGeminiModel();
+    // Unique list: start with active evergreen alias/configured model, then fallbacks
+    const modelsToTry = Array.from(new Set([
+      activeModel,
+      "gemini-flash-latest",
+      "gemini-3.8-flash"
+    ]));
+    let lastError: any = null;
 
-    console.log("Gemini raw response:", response);
-
-    // Handle function calls
-    const functionCalls = response.functionCalls;
-    if (functionCalls && functionCalls.length > 0) {
-      console.log("Function calls detected:", functionCalls);
-      const call = functionCalls[0];
-      if (call.name === "proposeFileRenames") {
-        const args = call.args as any;
-        console.log("Function call args:", args);
-        return args.fileList.map((f: RenameSuggestion) => ({
-          id: f.fileId,
-          originalName: f.currentName,
-          proposedName: f.proposedName,
-          reasoning: f.reasoning
+    for (const modelName of modelsToTry) {
+      try {
+        console.log(`Attempting Gemini generateContent with model: ${modelName}`);
+        const response = await fetchWithRetry(() => ai.models.generateContent({
+          model: modelName,
+          contents: prompt,
+          config: {
+            tools: [{ functionDeclarations: [proposeFileRenamesTool] }],
+          },
         }));
+
+        console.log("Gemini raw response:", response);
+
+        // Handle function calls
+        const functionCalls = response.functionCalls;
+        if (functionCalls && functionCalls.length > 0) {
+          console.log("Function calls detected:", functionCalls);
+          const call = functionCalls[0];
+          if (call.name === "proposeFileRenames") {
+            const args = call.args as any;
+            console.log("Function call args:", args);
+            return args.fileList.map((f: RenameSuggestion) => ({
+              id: f.fileId,
+              originalName: f.currentName,
+              proposedName: f.proposedName,
+              reasoning: f.reasoning
+            }));
+          }
+        } else {
+          console.warn("No function calls in Gemini response. Text output:", response.text);
+        }
+
+        return [];
+      } catch (err: any) {
+        lastError = err;
+        const errMsg = err?.message || String(err);
+        console.warn(`Model ${modelName} returned error:`, errMsg);
+        if (errMsg.includes("not found") || errMsg.includes("no longer available") || errMsg.includes("404")) {
+          // Try next model in fallback array
+          continue;
+        }
+        throw err;
       }
-    } else {
-      console.warn("No function calls in Gemini response. Text output:", response.text);
     }
 
+    if (lastError) {
+      throw lastError;
+    }
     return [];
   } catch (error) {
     console.error("Error in getRenameSuggestions:", error);
