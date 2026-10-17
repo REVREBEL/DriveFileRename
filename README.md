@@ -132,6 +132,33 @@ Google Apps Script requires all frontend code to be inlined.
 * Select **Google Workspace Add-on** and install it for your Google Drive.  
 * Refresh Google Drive and look for the icon in the sidebar.
 
+##
+
+## **TROUBLESHOOTING: `auth/unauthorized-domain`**
+
+If you encounter **`Firebase: Error (auth/unauthorized-domain)`** when deploying or signing in with Google:
+
+### **Why does this happen?**
+Firebase Authentication maintains an allowlist of **Authorized Domains** for OAuth popups and redirects. By default, it only authorizes `localhost` and `[project-id].firebaseapp.com`. When running as a Google Workspace Web App, Add-on, or on Cloud Run, requests originate from domains like `script.google.com`, `script.googleusercontent.com`, or your Cloud Run URL.
+
+### **How to fix:**
+1. Open the [Firebase Console](https://console.firebase.google.com/).
+2. Select your project (`revrebel`).
+3. In the left sidebar, navigate to **Build** > **Authentication**.
+4. Go to the **Settings** tab at the top.
+5. In the **Authorized domains** list, click **Add domain**.
+6. Add the domain(s) relevant to your deployment:
+   - For Google Apps Script Web App / Add-on:
+     - `script.google.com`
+     - `script.googleusercontent.com`
+   - For Cloud Run / AI Studio hosting:
+     - The domain of your Cloud Run app (e.g., `ais-pre-fnob6li34dzqpggion672i-228324111876.us-east1.run.app` or your custom domain)
+   - For your organization's custom domain:
+     - e.g. `revrebel.io`
+7. Click **Save**. The domain is authorized immediately (propagates within ~1 minute).
+
+*Tip: When running natively inside the Google Apps Script Add-on sidebar, switch to **"Local / Apps Script"** mode at the top of the interface. This mode uses the host container's native `google.script.run` without needing Firebase OAuth.*
+
 ## 
 
 

@@ -26,9 +26,24 @@ function onItemsSelected(e) {
  * Retrieves the Gemini API Key from Script Properties.
  */
 function getGeminiApiKey() {
-  const key = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
-  if (!key) console.error("GEMINI_API_KEY not found in Script Properties.");
+  const key = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY') || '';
+  if (!key) console.warn("GEMINI_API_KEY not found in Script Properties.");
   return key;
+}
+
+/**
+ * Saves or updates the Gemini API Key in Script Properties.
+ */
+function setGeminiApiKey(key) {
+  try {
+    if (key && typeof key === 'string' && key.trim().length > 0) {
+      PropertiesService.getScriptProperties().setProperty('GEMINI_API_KEY', key.trim());
+      return { success: true };
+    }
+    return { success: false, error: 'Empty or invalid API key' };
+  } catch (err) {
+    return { success: false, error: err.toString() };
+  }
 }
 
 const GEMINI_API_KEY = getGeminiApiKey();

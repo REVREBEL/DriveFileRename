@@ -14,12 +14,29 @@ export function initGemini(apiKey: string) {
 }
 
 /**
- * Gets the Gemini AI instance, initializing it with the environment variable if not already set.
+ * Checks whether an API key is currently configured either in memory, env, or localStorage.
+ */
+export function isGeminiConfigured(): boolean {
+  if (aiInstance) return true;
+  if (typeof process !== "undefined" && process.env && process.env.GEMINI_API_KEY) return true;
+  if (typeof window !== "undefined" && localStorage.getItem("GEMINI_API_KEY")) return true;
+  return false;
+}
+
+/**
+ * Gets the Gemini AI instance, checking memory, env, and localStorage.
  * @returns The GoogleGenAI instance.
  */
 function getAi() {
   if (!aiInstance) {
-    const apiKey = process.env.GEMINI_API_KEY || "";
+    const apiKey =
+      (typeof process !== "undefined" && process.env && process.env.GEMINI_API_KEY) ||
+      (typeof window !== "undefined" ? localStorage.getItem("GEMINI_API_KEY") || "" : "");
+
+    if (!apiKey) {
+      throw new Error("GEMINI_API_KEY_MISSING: Gemini API key is not configured. Please add it via settings or in Google Apps Script Script Properties.");
+    }
+
     aiInstance = new GoogleGenAI({ apiKey });
   }
   return aiInstance;
@@ -82,7 +99,7 @@ export async function getRenameSuggestions(
     console.log("Calling Gemini with prompt:", prompt);
     
     const response = await fetchWithRetry(() => ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-2.5-flash",
       contents: prompt,
       config: {
         tools: [{ functionDeclarations: [proposeFileRenamesTool] }],

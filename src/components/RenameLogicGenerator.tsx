@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import {
   Card,
   CardContent,
@@ -47,8 +47,9 @@ import {
   ShieldCheck,
   Globe,
   Info,
+  Key,
 } from "lucide-react";
-import { getRenameSuggestions, FileSuggestion, initGemini } from "@/src/services/geminiService";
+import { getRenameSuggestions, FileSuggestion, initGemini, isGeminiConfigured } from "@/src/services/geminiService";
 import {
   AppsScriptResponse,
   DriveFile,
@@ -74,8 +75,31 @@ interface EditableSuggestion extends FileSuggestion {
 }
 
 export default function RenameLogicGenerator() {
+  // Check if running inside Google Apps Script host container
+  const isAppsScriptEnvironment = useMemo(() => {
+    if (typeof window === "undefined") return false;
+    // @ts-ignore
+    const hasGoogleScript = typeof google !== "undefined" && !!google.script && !!google.script.run;
+    const isGoogleHost = window.location.hostname.includes("googleusercontent.com") ||
+                         window.location.hostname.includes("script.google.com");
+    return hasGoogleScript || isGoogleHost;
+  }, []);
+
   // Hybrid routing mode: 'local' (Apps Script) vs 'cloud' (Direct Google Drive API)
-  const [executionMode, setExecutionMode] = useState<"local" | "cloud">("cloud");
+  // When running inside Google Apps Script or on Google's iframe host, default to 'local'
+  // so native DriveApp permissions are used with zero Firebase Auth requirements!
+  const [executionMode, setExecutionMode] = useState<"local" | "cloud">(() => {
+    if (typeof window !== "undefined") {
+      // @ts-ignore
+      const hasGoogleScript = typeof google !== "undefined" && !!google.script && !!google.script.run;
+      const isGoogleHost = window.location.hostname.includes("googleusercontent.com") ||
+                           window.location.hostname.includes("script.google.com");
+      if (hasGoogleScript || isGoogleHost) {
+        return "local";
+      }
+    }
+    return "cloud";
+  });
   const [activeWorkflow, setActiveWorkflow] = useState<"ai" | "rules">("ai");
 
   // Google OAuth User State
@@ -97,6 +121,12 @@ export default function RenameLogicGenerator() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [tempEditedName, setTempEditedName] = useState("");
 
+  // Gemini API Key state & management
+  const [isKeyReady, setIsKeyReady] = useState<boolean>(() => isGeminiConfigured());
+  const [showKeyConfig, setShowKeyConfig] = useState(false);
+  const [keyInput, setKeyInput] = useState("");
+  const [savingKey, setSavingKey] = useState(false);
+
   // Rule-based batch renaming state
   const [prefix, setPrefix] = useState("");
   const [suffix, setSuffix] = useState("");
@@ -110,13 +140,91 @@ export default function RenameLogicGenerator() {
   const [sequenceStart, setSequenceStart] = useState(1);
   const [sequencePadding, setSequencePadding] = useState(2);
 
-  // Check if running inside Google Apps Script host container
-  const isAppsScriptEnvironment = useMemo(() => {
-    // @ts-ignore
-    return typeof google !== "undefined" && !!google.script && !!google.script.run;
+  // Local Apps Script: Fetch Selected Files via native google.script.run
+  const fetchFilesFromAppsScript = useCallback((isAutoFetch = false) => {
+    setFetching(true);
+    try {
+      // @ts-ignore
+      if (typeof google !== "undefined" && google.script && google.script.run) {
+        // @ts-ignore
+        google.script.run
+          .withSuccessHandler((response: AppsScriptResponse) => {
+            setFetching(false);
+            if (response && response.success && response.files && response.files.length > 0) {
+              setSelectedFiles(
+                response.files.map((f) => ({ ...f, source: "apps-script" }))
+              );
+              toast.success(`Loaded ${response.files.length} selected files from Google Drive`);
+            } else if (!isAutoFetch) {
+              if (response && response.error) {
+                toast.info(response.error);
+              } else {
+                toast.info("No files selected in Google Drive. Select files in Drive and click fetch.");
+              }
+            }
+          })
+          .withFailureHandler((err: Error) => {
+            setFetching(false);
+            if (!isAutoFetch) {
+              console.error("Script Execution Error (getSelectedFiles):", err);
+              toast.error("Apps Script Error: " + err.message);
+            }
+          })
+          .getSelectedFiles();
+      } else {
+        setFetching(false);
+        if (!isAutoFetch) {
+          toast.info("Apps Script host not detected in standalone view. You can switch to Cloud mode or enter names manually.");
+        }
+      }
+    } catch (error) {
+      setFetching(false);
+      console.error("Fetch error:", error);
+    }
   }, []);
 
-  // Initialize Auth on mount
+  // Save Gemini Key to Google Apps Script Properties and localStorage
+  const handleSaveGeminiKey = (newKey: string) => {
+    const trimmed = newKey.trim();
+    if (!trimmed) {
+      toast.error("Please enter a valid Gemini API key");
+      return;
+    }
+    setSavingKey(true);
+    initGemini(trimmed);
+    if (typeof window !== "undefined") {
+      localStorage.setItem("GEMINI_API_KEY", trimmed);
+    }
+    // @ts-ignore
+    if (typeof google !== "undefined" && google.script && google.script.run) {
+      // @ts-ignore
+      google.script.run
+        .withSuccessHandler(() => {
+          setSavingKey(false);
+          setIsKeyReady(true);
+          setShowKeyConfig(false);
+          setKeyInput("");
+          toast.success("Gemini API key saved to Workspace Script Properties!");
+        })
+        .withFailureHandler((err: Error) => {
+          console.warn("Could not save to Script Properties:", err);
+          setSavingKey(false);
+          setIsKeyReady(true);
+          setShowKeyConfig(false);
+          setKeyInput("");
+          toast.success("Gemini API key saved locally for this session!");
+        })
+        .setGeminiApiKey(trimmed);
+    } else {
+      setSavingKey(false);
+      setIsKeyReady(true);
+      setShowKeyConfig(false);
+      setKeyInput("");
+      toast.success("Gemini API key saved locally!");
+    }
+  };
+
+  // Initialize Auth & Apps Script integration on mount
   useEffect(() => {
     const unsubscribe = initAuth(
       (user, token) => {
@@ -129,26 +237,40 @@ export default function RenameLogicGenerator() {
       }
     );
 
-    // If running in Apps Script, also attempt to fetch Gemini API Key
+    // If running in Apps Script host container
     if (isAppsScriptEnvironment) {
+      setExecutionMode("local");
+      // Auto-load selected files from Drive
+      fetchFilesFromAppsScript(true);
+
+      // Attempt to retrieve Gemini API key from Apps Script Properties
       // @ts-ignore
-      google.script.run
-        .withSuccessHandler((key: string) => {
-          if (key) {
-            initGemini(key);
-            console.log("Gemini initialized with Apps Script key");
-          }
-        })
-        .withFailureHandler((err: Error) => {
-          console.warn("Script Execution Note (getGeminiApiKey):", err);
-        })
-        .getGeminiApiKey();
+      if (typeof google !== "undefined" && google.script && google.script.run) {
+        // @ts-ignore
+        google.script.run
+          .withSuccessHandler((key: string) => {
+            if (key) {
+              initGemini(key);
+              setIsKeyReady(true);
+              console.log("Gemini initialized with Apps Script key");
+            } else {
+              setIsKeyReady(isGeminiConfigured());
+            }
+          })
+          .withFailureHandler((err: Error) => {
+            console.warn("Script Execution Note (getGeminiApiKey):", err);
+            setIsKeyReady(isGeminiConfigured());
+          })
+          .getGeminiApiKey();
+      }
+    } else {
+      setIsKeyReady(isGeminiConfigured());
     }
 
     return () => {
       if (typeof unsubscribe === "function") unsubscribe();
     };
-  }, [isAppsScriptEnvironment]);
+  }, [isAppsScriptEnvironment, fetchFilesFromAppsScript]);
 
   // Google Sign In handler
   const handleGoogleSignIn = async () => {
@@ -162,7 +284,15 @@ export default function RenameLogicGenerator() {
       }
     } catch (err: any) {
       console.error("Sign in failed:", err);
-      toast.error(err.message || "Failed to sign in with Google.");
+      if (err?.code === "auth/unauthorized-domain" || err?.message?.includes("unauthorized-domain")) {
+        const domain = err.domain || (typeof window !== "undefined" ? window.location.hostname : "this domain");
+        toast.error(`Unauthorized Domain: ${domain}`, {
+          description: `Add "${domain}" in Firebase Console > Authentication > Settings > Authorized domains.`,
+          duration: 12000,
+        });
+      } else {
+        toast.error(err.message || "Failed to sign in with Google.");
+      }
     } finally {
       setAuthLoading(false);
     }
@@ -301,26 +431,44 @@ export default function RenameLogicGenerator() {
       newBase = applyCaseTransform(newBase, caseTransform);
     }
 
-    // 3. Sequential numbering
+    // 3. Format sequence number string
+    let formattedNum = "";
     if (addSequence) {
       const num = sequenceStart + index;
-      const formattedNum = String(num).padStart(sequencePadding, "0");
-      newBase = `${newBase}_${formattedNum}`;
+      formattedNum = String(num).padStart(sequencePadding, "0");
     }
 
     // 4. Prefix & Date stamp prefix
+    // If prefix is added with sequence (and no suffix), sequence attaches to the end of prefix: prefix00-filename or prefix00_filename
     let appliedPrefix = prefix;
     if (includeDateStamp && dateStampPosition === "prefix") {
       appliedPrefix = getFormattedDate(dateStampFormat) + appliedPrefix;
     }
-    if (appliedPrefix) {
-      newBase = appliedPrefix + newBase;
-    }
 
     // 5. Suffix & Date stamp suffix
+    // If suffix is added with sequence, sequence attaches to the end of suffix: filenamesufix00
     let appliedSuffix = suffix;
     if (includeDateStamp && dateStampPosition === "suffix") {
       appliedSuffix = appliedSuffix + "_" + getFormattedDate(dateStampFormat).replace(/_$/, "");
+    }
+
+    // Determine sequence placement:
+    // If user has prefix and no suffix: attach sequence to the end of prefix (e.g. prefix00 + filename)
+    // If user has suffix: attach sequence to the end of suffix (e.g. filename + sufix00)
+    // If neither prefix nor suffix: append to end of base name (e.g. filename_00)
+    // If both prefix and suffix: attach sequence to suffix at the end
+    if (addSequence && formattedNum) {
+      if (appliedPrefix && !appliedSuffix) {
+        appliedPrefix = `${appliedPrefix}${formattedNum}`;
+      } else if (appliedSuffix) {
+        appliedSuffix = `${appliedSuffix}${formattedNum}`;
+      } else {
+        newBase = `${newBase}_${formattedNum}`;
+      }
+    }
+
+    if (appliedPrefix) {
+      newBase = appliedPrefix + newBase;
     }
     if (appliedSuffix) {
       newBase = newBase + appliedSuffix;
@@ -529,45 +677,17 @@ export default function RenameLogicGenerator() {
     }
   };
 
-  // Local Apps Script: Fetch Selected Files
-  const fetchFilesFromAppsScript = () => {
-    setFetching(true);
-    try {
-      // @ts-ignore
-      if (typeof google !== "undefined" && google.script && google.script.run) {
-        // @ts-ignore
-        google.script.run
-          .withSuccessHandler((response: AppsScriptResponse) => {
-            setFetching(false);
-            if (response.success && response.files) {
-              setSelectedFiles(
-                response.files.map((f) => ({ ...f, source: "apps-script" }))
-              );
-              toast.success(`Fetched ${response.files.length} selected files from Drive Add-on`);
-            } else {
-              console.error("Backend Error (getSelectedFiles):", response.error);
-              toast.error(response.error || "No files selected in Google Drive Add-on");
-            }
-          })
-          .withFailureHandler((err: Error) => {
-            setFetching(false);
-            console.error("Script Execution Error (getSelectedFiles):", err);
-            toast.error("Apps Script Error: " + err.message);
-          })
-          .getSelectedFiles();
-      } else {
-        setFetching(false);
-        toast.info("Apps Script host not detected in standalone view. You can switch to Cloud mode or enter names manually.");
-      }
-    } catch (error) {
-      setFetching(false);
-      console.error("Fetch error:", error);
-    }
-  };
-
   const handleAnalyze = async () => {
     if (selectedFiles.length === 0 && !fileInput.trim()) {
       toast.error("Please provide file names or select files from Google Drive.");
+      return;
+    }
+
+    if (!isKeyReady && !isGeminiConfigured()) {
+      setShowKeyConfig(true);
+      toast.error("Gemini API key required for AI renaming.", {
+        description: "Please enter your Gemini API key below or set GEMINI_API_KEY in Apps Script Script Properties."
+      });
       return;
     }
 
@@ -602,19 +722,24 @@ export default function RenameLogicGenerator() {
       setSelectedIds(new Set(result.map((s) => s.id)));
 
       if (result.length > 0) {
-        toast.success(`Generated ${result.length} AI proposals using Gemini 3 Flash!`);
+        toast.success(`Generated ${result.length} AI proposals using Gemini!`);
       } else {
         toast.warning("Gemini returned no suggestions. Try adjusting your intent.");
       }
     } catch (error: any) {
       console.error("Analyze error details:", error);
       const errorMessage = error?.message || String(error);
-      if (errorMessage.includes("API key not valid") || errorMessage.includes("API_KEY_INVALID")) {
-        toast.error("Invalid Gemini API Key. Please verify in settings or Apps Script properties.");
+      if (
+        errorMessage.includes("GEMINI_API_KEY_MISSING") ||
+        errorMessage.includes("API key not valid") ||
+        errorMessage.includes("API_KEY_INVALID")
+      ) {
+        setShowKeyConfig(true);
+        toast.error("Missing or invalid Gemini API Key. Enter your key in the AI settings panel.");
       } else if (errorMessage.includes("quota") || errorMessage.includes("429")) {
         toast.error("Gemini API quota exceeded. Please try again in a moment.");
       } else {
-        toast.error("Failed to generate suggestions. Check console for details.");
+        toast.error("Failed to generate suggestions. " + (errorMessage.length > 90 ? errorMessage.slice(0, 90) + "..." : errorMessage));
       }
     } finally {
       setLoading(false);
@@ -837,14 +962,14 @@ async function renameInCloud(fileId, newName, accessToken) {
                   <span>Google Drive REST API (Standalone & Picker)</span>
                 </div>
               ) : (
-                <div className="flex items-center gap-1.5 font-bold text-amber-900">
-                  <Laptop className="h-3.5 w-3.5 text-amber-600" />
-                  <span>Google Apps Script Container (code.gs Add-on)</span>
+                <div className="flex items-center gap-1.5 font-bold text-emerald-900">
+                  <Laptop className="h-3.5 w-3.5 text-emerald-600" />
+                  <span>Google Workspace Add-on (Native Drive Session)</span>
                 </div>
               )}
             </div>
 
-            {/* Auth Actions in Cloud Mode */}
+            {/* Auth Actions in Cloud Mode vs Native Local Mode */}
             {executionMode === "cloud" ? (
               <div className="flex items-center gap-2">
                 {currentUser ? (
@@ -878,19 +1003,44 @@ async function renameInCloud(fileId, newName, accessToken) {
                 )}
               </div>
             ) : (
-              <div className="flex items-center gap-1.5 text-[11px] opacity-70">
-                <Info className="h-3.5 w-3.5" />
-                <span>Runs inside Workspace Add-on via <code>google.script.run</code></span>
+              <div className="flex items-center gap-2">
+                <Badge variant="outline" className="border-emerald-700 text-emerald-800 bg-emerald-50 text-[10px] uppercase font-mono px-2 py-0.5 rounded-none flex items-center gap-1">
+                  <CheckCircle2 className="h-3 w-3 text-emerald-600" />
+                  Workspace Add-on Authenticated
+                </Badge>
+                <span className="text-[10px] opacity-60 hidden md:inline">
+                  (Uses native DriveApp permissions via code.gs)
+                </span>
               </div>
             )}
           </div>
+
+          {/* Notice if Cloud mode is selected while inside Apps Script */}
+          {isAppsScriptEnvironment && executionMode === "cloud" && (
+            <div className="bg-amber-50 border border-amber-300 p-2.5 text-xs text-amber-900 font-mono flex items-start justify-between gap-3">
+              <div className="flex items-start gap-2">
+                <Info className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-bold">Google Workspace Add-on Detected:</span> You are running inside Apps Script where Drive access is already authenticated natively! Switch to <strong>Local (Apps Script)</strong> mode to rename files directly without requiring Firebase Auth domain setup.
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setExecutionMode("local")}
+                className="h-6 px-2.5 text-[10px] uppercase font-mono border-amber-800 text-amber-950 bg-amber-100 hover:bg-amber-200 shrink-0 rounded-none"
+              >
+                Switch to Local Mode
+              </Button>
+            </div>
+          )}
         </header>
 
         {/* Main Content Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           
           {/* Left Column: Input, Picker & Rules Engine */}
-          <div className="lg:col-span-5 space-y-6">
+          <div className="lg:col-span-4 space-y-6">
             
             {/* Target Files Selection Card */}
             <Card className="rounded-none border-[#141414] bg-white/40 shadow-none">
@@ -1047,15 +1197,87 @@ async function renameInCloud(fileId, newName, accessToken) {
             {activeWorkflow === "ai" && (
               <Card className="rounded-none border-[#141414] bg-white/40 shadow-none">
                 <CardHeader className="border-b border-[#141414] pb-3">
-                  <CardTitle className="text-xs uppercase tracking-widest font-mono flex items-center gap-1.5">
-                    <Sparkles className="h-3.5 w-3.5" />
-                    Gemini AI Rename Intent
-                  </CardTitle>
-                  <CardDescription className="font-serif italic text-xs">
-                    Uses OCR document text and contextual pattern intelligence
-                  </CardDescription>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <CardTitle className="text-xs uppercase tracking-widest font-mono flex items-center gap-1.5">
+                        <Sparkles className="h-3.5 w-3.5 text-amber-600" />
+                        Gemini AI Rename Intent
+                      </CardTitle>
+                      <CardDescription className="font-serif italic text-xs">
+                        Uses document OCR text and contextual pattern intelligence
+                      </CardDescription>
+                    </div>
+                    {/* API Key Status Pill */}
+                    <div>
+                      {isKeyReady ? (
+                        <button
+                          type="button"
+                          onClick={() => setShowKeyConfig((prev) => !prev)}
+                          className="flex items-center gap-1 text-[10px] font-mono font-medium text-emerald-800 bg-emerald-100/80 px-2 py-0.5 border border-emerald-300 hover:bg-emerald-200 transition-colors"
+                          title="Click to view or edit Gemini API key"
+                        >
+                          <CheckCircle2 className="h-3 w-3 text-emerald-600" />
+                          <span>Gemini Ready</span>
+                          <Key className="h-2.5 w-2.5 ml-0.5 opacity-60" />
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setShowKeyConfig(true)}
+                          className="flex items-center gap-1 text-[10px] font-mono font-bold text-amber-900 bg-amber-100 px-2 py-0.5 border border-amber-400 hover:bg-amber-200 transition-colors animate-pulse"
+                          title="Configure your Gemini API key"
+                        >
+                          <Key className="h-3 w-3 text-amber-700" />
+                          <span>Configure Key</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 </CardHeader>
                 <CardContent className="pt-4 space-y-4">
+                  {/* API Key Configuration Panel */}
+                  {(showKeyConfig || !isKeyReady) && (
+                    <div className="p-3 bg-amber-50/70 border border-amber-300/80 space-y-2 text-xs font-mono">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold flex items-center gap-1 text-amber-950">
+                          <Key className="h-3.5 w-3.5 text-amber-700" />
+                          Gemini API Key Setup
+                        </span>
+                        {isKeyReady && (
+                          <button
+                            type="button"
+                            onClick={() => setShowKeyConfig(false)}
+                            className="text-[10px] text-amber-800 hover:underline"
+                          >
+                            Hide
+                          </button>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-amber-900/80 font-sans">
+                        In Google Workspace, this key is saved to your Apps Script Script Properties so it stays active across sessions.
+                      </p>
+                      <div className="flex gap-2">
+                        <Input
+                          type="password"
+                          placeholder="Paste Gemini API key (AIza...)"
+                          value={keyInput}
+                          onChange={(e) => setKeyInput(e.target.value)}
+                          className="rounded-none border-[#141414]/30 bg-white font-mono text-xs h-8 flex-1"
+                        />
+                        <Button
+                          size="sm"
+                          disabled={savingKey || !keyInput.trim()}
+                          onClick={() => handleSaveGeminiKey(keyInput)}
+                          className="rounded-none bg-[#141414] text-[#E4E3E0] hover:bg-[#141414]/90 h-8 font-mono text-xs uppercase shrink-0"
+                        >
+                          {savingKey ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Check className="h-3 w-3 mr-1" />}
+                          Save Key
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Intent input */}
                   <div className="space-y-1.5">
                     <label className="text-[10px] uppercase font-mono opacity-60">Instruction / Pattern</label>
                     <Input
@@ -1064,6 +1286,41 @@ async function renameInCloud(fileId, newName, accessToken) {
                       value={intent}
                       onChange={(e) => setIntent(e.target.value)}
                     />
+                  </div>
+
+                  {/* Complex Scenario Quick Presets */}
+                  <div className="space-y-1.5 pt-1">
+                    <span className="text-[10px] uppercase font-mono opacity-50 block">Complex Rename Presets:</span>
+                    <div className="flex flex-wrap gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setIntent("Extract invoice date and vendor name: YYYY-MM-DD_[Vendor]_[Invoice#].pdf")}
+                        className="text-[10px] font-mono px-2 py-1 bg-white/80 hover:bg-[#141414] hover:text-[#E4E3E0] border border-[#141414]/20 transition-colors text-left"
+                      >
+                        📄 Invoices (OCR Date + Vendor)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIntent("Extract agreement party name and execution date: [Party]_[DocType]_[YYYY-MM].pdf")}
+                        className="text-[10px] font-mono px-2 py-1 bg-white/80 hover:bg-[#141414] hover:text-[#E4E3E0] border border-[#141414]/20 transition-colors text-left"
+                      >
+                        📑 Contracts & Agreements
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIntent("Prefix with receipt purchase date and merchant: YYYYMMDD_[Merchant]_[Total].pdf")}
+                        className="text-[10px] font-mono px-2 py-1 bg-white/80 hover:bg-[#141414] hover:text-[#E4E3E0] border border-[#141414]/20 transition-colors text-left"
+                      >
+                        🧾 Receipts & Expenses
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIntent("Standardize dates to ISO YYYY-MM-DD, convert underscores to hyphens, and clean casing")}
+                        className="text-[10px] font-mono px-2 py-1 bg-white/80 hover:bg-[#141414] hover:text-[#E4E3E0] border border-[#141414]/20 transition-colors text-left"
+                      >
+                        🧹 Normalize ISO & Case
+                      </button>
+                    </div>
                   </div>
 
                   <Button
@@ -1194,7 +1451,7 @@ async function renameInCloud(fileId, newName, accessToken) {
                           className="border-[#141414] data-[state=checked]:bg-[#141414] data-[state=checked]:text-[#E4E3E0]"
                         />
                         <label htmlFor="seq-toggle" className="text-xs font-mono cursor-pointer select-none flex items-center gap-1">
-                          <Hash className="h-3 w-3 opacity-60" /> Append Number Sequence
+                          <Hash className="h-3 w-3 opacity-60" /> Number Sequence (e.g. prefix01- or suffix01)
                         </label>
                       </div>
                     </div>
@@ -1254,7 +1511,7 @@ async function renameInCloud(fileId, newName, accessToken) {
           </div>
 
           {/* Right Column: Review & Execution Table */}
-          <div className="lg:col-span-7 space-y-6">
+          <div className="lg:col-span-8 space-y-6">
             <Tabs defaultValue="suggestions" className="w-full">
               <TabsList className="w-full justify-start rounded-none bg-transparent border-b border-[#141414] p-0 h-auto">
                 <TabsTrigger
@@ -1318,20 +1575,20 @@ async function renameInCloud(fileId, newName, accessToken) {
                   </div>
 
                   {/* Table Area */}
-                  <ScrollArea className="h-[480px]">
-                    <Table>
+                  <ScrollArea className="h-[520px]">
+                    <Table className="w-full">
                       <TableHeader className="bg-[#141414] text-[#E4E3E0] sticky top-0 z-10">
                         <TableRow className="hover:bg-transparent border-none">
-                          <TableHead className="w-[44px] text-[#E4E3E0]">
+                          <TableHead className="w-[40px] text-[#E4E3E0]">
                             <Checkbox
                               checked={suggestions.length > 0 && selectedIds.size === suggestions.length}
                               onCheckedChange={toggleAll}
                               className="border-[#E4E3E0] data-[state=checked]:bg-[#E4E3E0] data-[state=checked]:text-[#141414]"
                             />
                           </TableHead>
-                          <TableHead className="text-[#E4E3E0] text-[10px] uppercase font-mono w-[35%]">Original File</TableHead>
-                          <TableHead className="text-[#E4E3E0] text-[10px] uppercase font-mono w-[45%]">Proposed Name (Click to edit)</TableHead>
-                          <TableHead className="text-[#E4E3E0] text-[10px] uppercase font-mono w-[20%] text-right">Status</TableHead>
+                          <TableHead className="text-[#E4E3E0] text-[10px] uppercase font-mono w-[42%]">Original File</TableHead>
+                          <TableHead className="text-[#E4E3E0] text-[10px] uppercase font-mono w-[46%]">Proposed Name (Click to edit)</TableHead>
+                          <TableHead className="text-[#E4E3E0] text-[10px] uppercase font-mono w-[12%] text-right pr-4">Status</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
@@ -1365,19 +1622,21 @@ async function renameInCloud(fileId, newName, accessToken) {
                               </TableCell>
 
                               {/* Original Name */}
-                              <TableCell className="font-mono text-xs align-middle">
-                                <span className="font-medium truncate block max-w-[200px]" title={s.originalName}>
+                              <TableCell className="font-mono text-xs align-middle py-3 pr-3">
+                                <span className="font-medium break-all block text-[12px] leading-snug" title={s.originalName}>
                                   {s.originalName}
                                 </span>
-                                <span className="text-[10px] opacity-50 block font-serif italic truncate max-w-[200px]" title={s.reasoning}>
-                                  {s.reasoning}
-                                </span>
+                                {s.reasoning && (
+                                  <span className="text-[10px] opacity-50 block font-serif italic mt-0.5 break-all" title={s.reasoning}>
+                                    {s.reasoning}
+                                  </span>
+                                )}
                               </TableCell>
 
                               {/* Proposed Name / Inline Editing */}
-                              <TableCell className="font-mono text-xs align-middle">
+                              <TableCell className="font-mono text-xs align-middle py-3 pr-3">
                                 {editingId === s.id ? (
-                                  <div className="flex items-center gap-1.5">
+                                  <div className="flex items-center gap-1.5 w-full">
                                     <Input
                                       value={tempEditedName}
                                       onChange={(e) => setTempEditedName(e.target.value)}
@@ -1386,13 +1645,13 @@ async function renameInCloud(fileId, newName, accessToken) {
                                         if (e.key === "Escape") setEditingId(null);
                                       }}
                                       autoFocus
-                                      className="h-7 text-xs font-mono rounded-none border-[#141414] bg-white px-1.5"
+                                      className="h-8 text-xs font-mono rounded-none border-[#141414] bg-white px-2 flex-1"
                                     />
                                     <Button
                                       size="sm"
                                       variant="ghost"
                                       onClick={() => saveEditing(s.id)}
-                                      className="h-7 px-2 text-[10px] font-mono uppercase bg-[#141414] text-[#E4E3E0] hover:bg-[#141414]/80 rounded-none"
+                                      className="h-8 px-2.5 text-[10px] font-mono uppercase bg-[#141414] text-[#E4E3E0] hover:bg-[#141414]/80 rounded-none shrink-0"
                                     >
                                       Save
                                     </Button>
@@ -1400,19 +1659,19 @@ async function renameInCloud(fileId, newName, accessToken) {
                                 ) : (
                                   <div 
                                     onClick={() => startEditing(s.id, s.proposedName)}
-                                    className="group flex items-center justify-between cursor-pointer py-1 px-1.5 rounded hover:bg-white/80 border border-transparent hover:border-[#141414]/20 transition-all"
+                                    className="group flex items-start justify-between cursor-pointer py-1 px-1.5 rounded hover:bg-white/90 border border-transparent hover:border-[#141414]/20 transition-all gap-2"
                                     title="Click to manually edit proposed name"
                                   >
-                                    <span className="font-bold truncate max-w-[220px]" title={s.proposedName}>
+                                    <span className="font-bold break-all text-[12px] text-emerald-950 leading-snug" title={s.proposedName}>
                                       {s.proposedName}
                                     </span>
-                                    <Edit3 className="h-3 w-3 opacity-0 group-hover:opacity-60 transition-opacity ml-1 shrink-0" />
+                                    <Edit3 className="h-3 w-3 opacity-0 group-hover:opacity-60 transition-opacity shrink-0 mt-0.5" />
                                   </div>
                                 )}
                               </TableCell>
 
                               {/* Status Badge */}
-                              <TableCell className="text-right align-middle">
+                              <TableCell className="text-right align-middle py-3 pr-4">
                                 {s.status === "success" && (
                                   <Badge className="bg-emerald-700 text-white rounded-none text-[9px] font-mono uppercase gap-1">
                                     <CheckCircle2 className="h-2.5 w-2.5" /> Renamed
