@@ -48,6 +48,7 @@ import {
   Globe,
   Info,
   Key,
+  RotateCcw,
 } from "lucide-react";
 import { getRenameSuggestions, FileSuggestion, initGemini, isGeminiConfigured, getActiveGeminiModel } from "@/src/services/geminiService";
 import {
@@ -750,6 +751,65 @@ export default function RenameLogicGenerator() {
     setSelectedFiles((prev) => prev.filter((f) => f.fileId !== id));
   };
 
+  /**
+   * Clears processed files from both the Proposed Names section and Target Files section
+   * after a batch rename, while strictly keeping the user's instruction / intent intact.
+   */
+  const handleClearProcessed = () => {
+    const processedSuggestions = suggestions.filter((s) => s.status === "success");
+
+    if (processedSuggestions.length > 0) {
+      const processedIds = new Set(processedSuggestions.map((s) => s.id));
+      const processedNames = new Set(
+        processedSuggestions.map((s) => s.originalName.trim().toLowerCase())
+      );
+
+      // 1. Remove processed items from Proposed Names (suggestions)
+      setSuggestions((prev) => prev.filter((s) => s.status !== "success"));
+
+      // Clean up selection state
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        processedIds.forEach((id) => next.delete(id));
+        return next;
+      });
+
+      // 2. Remove processed items from Target Files (selectedFiles)
+      setSelectedFiles((prev) =>
+        prev.filter(
+          (f) =>
+            !processedIds.has(f.fileId) &&
+            !processedNames.has(f.currentName.trim().toLowerCase())
+        )
+      );
+
+      // 3. If manual fileInput was used, remove processed lines
+      if (fileInput.trim()) {
+        const remaining = fileInput
+          .split("\n")
+          .filter((line) => {
+            const raw = line.trim();
+            if (!raw) return false;
+            const nameOnly = (raw.split("|")[0] || "").trim().toLowerCase();
+            return !processedNames.has(nameOnly);
+          })
+          .join("\n");
+        setFileInput(remaining);
+      }
+
+      toast.success(
+        `Cleared ${processedSuggestions.length} processed file(s). Instruction preserved for next batch!`
+      );
+    } else {
+      // If user wants to start over and reset files completely
+      setSuggestions([]);
+      setSelectedIds(new Set());
+      setSelectedFiles([]);
+      setFileInput("");
+      toast.info("Cleared target files and proposals. Instruction preserved.");
+    }
+  };
+
   const toggleSelect = (id: string) => {
     const next = new Set(selectedIds);
     if (next.has(id)) next.delete(id);
@@ -1131,12 +1191,25 @@ async function renameInCloud(fileId, newName, accessToken) {
                     </ScrollArea>
                     <div className="flex justify-between items-center text-[10px] font-mono opacity-60">
                       <span>{selectedFiles.length} file(s) loaded</span>
-                      <button
-                        onClick={() => setSelectedFiles([])}
-                        className="hover:underline uppercase text-[9px]"
-                      >
-                        Clear All
-                      </button>
+                      <div className="flex items-center gap-2.5">
+                        {suggestions.some((s) => s.status === "success") && (
+                          <button
+                            type="button"
+                            onClick={handleClearProcessed}
+                            className="hover:underline uppercase text-[9px] text-emerald-800 font-bold"
+                            title="Remove processed files while keeping instruction"
+                          >
+                            Clear Processed
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setSelectedFiles([])}
+                          className="hover:underline uppercase text-[9px]"
+                        >
+                          Clear All
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ) : (
@@ -1285,10 +1358,14 @@ async function renameInCloud(fileId, newName, accessToken) {
 
                   {/* Intent input */}
                   <div className="space-y-1.5">
-                    <label className="text-[10px] uppercase font-mono opacity-60">Instruction / Pattern</label>
-                    <Input
-                      placeholder="e.g. Add the invoice or receipt date to the start in format yyyyMMdd_"
-                      className="rounded-none border-[#141414]/30 focus-visible:ring-0 bg-white/80 font-mono text-xs"
+                    <div className="flex justify-between items-center">
+                      <label className="text-[10px] uppercase font-mono opacity-60">Instruction / Pattern</label>
+                      <span className="text-[9px] font-mono opacity-40">Describe pattern or extraction rules</span>
+                    </div>
+                    <Textarea
+                      placeholder="e.g. Add the invoice or receipt date to the start in format yyyyMMdd_&#10;Extract company or vendor name from content&#10;Preserve extension and replace spaces with hyphens"
+                      rows={3}
+                      className="min-h-[84px] rounded-none border-[#141414]/30 focus-visible:ring-0 bg-white/80 font-mono text-xs leading-relaxed resize-y"
                       value={intent}
                       onChange={(e) => setIntent(e.target.value)}
                     />
@@ -1557,6 +1634,27 @@ async function renameInCloud(fileId, newName, accessToken) {
                     </div>
 
                     <div className="flex items-center gap-2 w-full sm:w-auto">
+                      {(suggestions.some((s) => s.status === "success") || (suggestions.length > 0 && selectedFiles.length > 0)) && (
+                        <Button
+                          type="button"
+                          onClick={handleClearProcessed}
+                          variant="outline"
+                          size="sm"
+                          disabled={renaming}
+                          className={`rounded-none h-8 text-[11px] uppercase font-mono tracking-wider w-full sm:w-auto px-3 flex items-center justify-center gap-1.5 transition-colors ${
+                            suggestions.some((s) => s.status === "success")
+                              ? "border-emerald-700 bg-emerald-50 text-emerald-900 hover:bg-emerald-100 font-bold"
+                              : "border-[#141414]/30 hover:bg-[#141414] hover:text-[#E4E3E0] text-[#141414]"
+                          }`}
+                          title="Remove processed files from both proposals and target files, keeping your instruction intact"
+                        >
+                          <RotateCcw className="h-3.5 w-3.5" />
+                          {suggestions.some((s) => s.status === "success")
+                            ? "Start Over / Clear Processed"
+                            : "Start Over"}
+                        </Button>
+                      )}
+
                       <Button
                         onClick={handleExecuteRenaming}
                         disabled={renaming || selectedIds.size === 0}
@@ -1579,6 +1677,30 @@ async function renameInCloud(fileId, newName, accessToken) {
                       </Button>
                     </div>
                   </div>
+
+                  {/* Batch Completion Banner */}
+                  {suggestions.some((s) => s.status === "success") && (
+                    <div className="bg-emerald-50/90 border-b border-emerald-300 px-3.5 py-2.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5 font-mono">
+                      <div className="flex items-center gap-2 text-emerald-950 text-xs">
+                        <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
+                        <div>
+                          <span className="font-bold">Batch Complete!</span>{" "}
+                          <span>
+                            {suggestions.filter((s) => s.status === "success").length} of {suggestions.length} file(s) renamed.
+                          </span>
+                        </div>
+                      </div>
+                      <Button
+                        size="sm"
+                        type="button"
+                        onClick={handleClearProcessed}
+                        className="rounded-none bg-emerald-800 hover:bg-emerald-900 text-white h-7 text-[10px] uppercase font-mono tracking-wider px-3 shrink-0 flex items-center gap-1.5"
+                      >
+                        <RotateCcw className="h-3 w-3" />
+                        Start Over (Next Batch)
+                      </Button>
+                    </div>
+                  )}
 
                   {/* Table Area */}
                   <ScrollArea className="h-[520px]">
