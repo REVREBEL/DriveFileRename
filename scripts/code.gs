@@ -46,6 +46,28 @@ function setGeminiApiKey(key) {
   }
 }
 
+/**
+ * Retrieves the preferred Gemini model (defaults to evergreen 'gemini-flash-latest').
+ */
+function getGeminiModel() {
+  return PropertiesService.getScriptProperties().getProperty('GEMINI_MODEL') || 'gemini-flash-latest';
+}
+
+/**
+ * Sets a custom Gemini model in Script Properties.
+ */
+function setGeminiModel(modelName) {
+  try {
+    if (modelName && typeof modelName === 'string') {
+      PropertiesService.getScriptProperties().setProperty('GEMINI_MODEL', modelName.trim());
+      return { success: true };
+    }
+    return { success: false, error: 'Empty model name' };
+  } catch (err) {
+    return { success: false, error: err.toString() };
+  }
+}
+
 const GEMINI_API_KEY = getGeminiApiKey();
 
 /**

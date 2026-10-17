@@ -49,7 +49,7 @@ import {
   Info,
   Key,
 } from "lucide-react";
-import { getRenameSuggestions, FileSuggestion, initGemini, isGeminiConfigured } from "@/src/services/geminiService";
+import { getRenameSuggestions, FileSuggestion, initGemini, isGeminiConfigured, getActiveGeminiModel } from "@/src/services/geminiService";
 import {
   AppsScriptResponse,
   DriveFile,
@@ -1207,8 +1207,14 @@ async function renameInCloud(fileId, newName, accessToken) {
                         Uses document OCR text and contextual pattern intelligence
                       </CardDescription>
                     </div>
-                    {/* API Key Status Pill */}
-                    <div>
+                    {/* Model & API Key Status Pills */}
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span
+                        className="text-[10px] font-mono text-stone-600 bg-stone-100 px-1.5 py-0.5 border border-stone-300"
+                        title="Google automatically routes this alias to the newest active Flash model"
+                      >
+                        {getActiveGeminiModel()} <span className="text-emerald-700 font-semibold">• evergreen</span>
+                      </span>
                       {isKeyReady ? (
                         <button
                           type="button"
